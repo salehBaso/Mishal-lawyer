@@ -19,7 +19,7 @@ const displayFont = Tajawal({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? 'https://mishal-legal.sa'),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || 'https://mishal-legal.sa'),
   title: {
     default: 'شركة مشعل الجهني للمحاماة والاستشارات',
     template: '%s | شركة مشعل الجهني للمحاماة والاستشارات',

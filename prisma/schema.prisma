@@ -1,0 +1,895 @@
+// ============================================================================
+// شركة مشعل الجهني للمحاماة والاستشارات — Database Schema
+// PostgreSQL + Prisma
+//
+// مبادئ التصميم:
+// 1) Multi-Tenant: كل بيانات المكتب مرتبطة بـ Organization (تجهيزًا لتحويل
+//    المنصة إلى SaaS يخدم عدة مكاتب لاحقًا دون إعادة هيكلة).
+// 2) RBAC حقيقي: Role + Permission منفصلان عن بعضهما (وليس enum جامد فقط)
+//    حتى يمكن للـ Firm Admin تخصيص صلاحيات دقيقة لاحقًا دون تعديل الكود.
+// 3) عزل بيانات العميل: كل Case/Document مرتبط بأطراف محددة عبر CaseParty
+//    و CaseAssignment — لا وصول افتراضي، فقط وصول صريح.
+// 4) Audit Log غير قابل للتعديل من التطبيق (لا يوجد update/delete مكشوف).
+// 5) كل تكامل خارجي (Najiz, Payments, AI) له جدول Integration + Adapter مستقل.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Multi-Tenancy
+// ----------------------------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  nameAr    String
+  slug      String   @unique
+  logoUrl   String?
+  brand     Json? // ألوان/شعار قابلة للتخصيص لكل مكتب (multi-tenant theming)
+  plan      OrgPlan  @default(FIRM)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users             User[]
+  clients           Client[]
+  cases             Case[]
+  documents         Document[]
+  invoices          Invoice[]
+  marketplaceOrders Order[]
+  auditLogs         AuditLog[]
+  notifications     Notification[]
+  integrations      Integration[]
+  practiceAreas     PracticeArea[]
+
+  @@map("organizations")
+}
+
+enum OrgPlan {
+  FIRM
+  ENTERPRISE
+  SAAS_TENANT
+}
+
+// ----------------------------------------------------------------------------
+// RBAC — Users, Roles, Permissions
+// ----------------------------------------------------------------------------
+
+enum RoleName {
+  SUPER_ADMIN
+  FIRM_ADMIN
+  MANAGING_PARTNER
+  LAWYER
+  LEGAL_RESEARCHER
+  CASE_COORDINATOR
+  ACCOUNTANT
+  CLIENT
+  SERVICE_PROVIDER
+  EXTERNAL_EXPERT
+  READ_ONLY
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        RoleName @unique
+  label       String
+  labelAr     String
+  description String?
+  isSystem    Boolean  @default(true) // أدوار النظام الأساسية غير قابلة للحذف
+
+  permissions RolePermission[]
+  users       User[]
+
+  @@map("roles")
+}
+
+/// وحدة صلاحية دقيقة: resource + action
+/// مثال: resource="case.documents", action="download"
+model Permission {
+  id       String @id @default(cuid())
+  resource String
+  action   String
+  label    String
+
+  roles RolePermission[]
+
+  @@unique([resource, action])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING_INVITE
+  DEACTIVATED
+}
+
+model User {
+  id                String     @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id])
+  roleId            String
+  role              Role       @relation(fields: [roleId], references: [id])
+
+  fullName          String
+  fullNameAr        String?
+  email             String     @unique
+  phone             String?
+  passwordHash      String
+  avatarUrl         String?
+  status            UserStatus @default(ACTIVE)
+
+  mfaEnabled        Boolean    @default(false)
+  mfaSecret         String?
+  lastLoginAt       DateTime?
+  lastLoginIp       String?
+
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  lawyerProfile     Lawyer?
+  clientProfile     Client?
+  providerProfile   MarketplaceProvider?
+
+  assignedCases     CaseAssignment[]
+  caseTasks         CaseTask[]         @relation("TaskAssignee")
+  createdTasks      CaseTask[]         @relation("TaskCreator")
+  documentsUploaded Document[]         @relation("DocumentUploader")
+  hearings          HearingAttendee[]
+  sentMessages      Message[]          @relation("MessageSender")
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+  sessions          UserSession[]
+
+  @@index([organizationId])
+  @@map("users")
+}
+
+/// جلسات المستخدم — لإدارة Session قوية (تسجيل خروج عن بُعد، كشف الأجهزة)
+model UserSession {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ipAddress    String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime
+  revokedAt    DateTime?
+
+  @@index([userId])
+  @@map("user_sessions")
+}
+
+// ----------------------------------------------------------------------------
+// Lawyers / Clients
+// ----------------------------------------------------------------------------
+
+model Lawyer {
+  id               String   @id @default(cuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  licenseNumber    String?
+  title            String? // شريك، محامٍ أول، محامٍ...
+  specializations  String[] // معرّفات PracticeArea
+  yearsOfExperience Int?
+  bio              String?
+  hourlyRate       Decimal? @db.Decimal(10, 2)
+
+  caseAssignments  CaseAssignment[]
+
+  @@map("lawyers")
+}
+
+enum ClientType {
+  INDIVIDUAL
+  CORPORATE
+}
+
+model Client {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  userId         String?      @unique
+  user           User?        @relation(fields: [userId], references: [id])
+
+  type           ClientType   @default(INDIVIDUAL)
+  fullName       String
+  companyName    String?
+  commercialRegNo String?
+  nationalId     String?
+  email          String?
+  phone          String?
+  address        String?
+  notes          String?
+
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  cases          CaseParty[]
+  invoices       Invoice[]
+
+  @@index([organizationId])
+  @@map("clients")
+}
+
+// ----------------------------------------------------------------------------
+// Practice Areas (قابلة للإدارة من Admin)
+// ----------------------------------------------------------------------------
+
+model PracticeArea {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  key            String // commercial | corporate | litigation ...
+  name           String
+  nameAr         String
+  description    String?
+  icon           String?
+  isActive       Boolean      @default(true)
+  sortOrder      Int          @default(0)
+
+  cases          Case[]
+
+  @@unique([organizationId, key])
+  @@map("practice_areas")
+}
+
+// ----------------------------------------------------------------------------
+// Cases — Case War Room
+// ----------------------------------------------------------------------------
+
+enum CaseStatus {
+  INTAKE
+  ACTIVE
+  ON_HOLD
+  IN_COURT
+  SETTLEMENT
+  CLOSED_WON
+  CLOSED_LOST
+  CLOSED_SETTLED
+  ARCHIVED
+}
+
+enum CaseRiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model Case {
+  id             String        @id @default(cuid())
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id])
+  caseNumber     String // مثال: 2026-0184
+  title          String
+  practiceAreaId String?
+  practiceArea   PracticeArea? @relation(fields: [practiceAreaId], references: [id])
+
+  status         CaseStatus    @default(INTAKE)
+  riskLevel      CaseRiskLevel @default(MEDIUM)
+  /// درجة قوة القضية 0-100 — تُحسب من عوامل قابلة للتفسير (Evidence, Timeline consistency...)
+  strengthScore  Int?          @default(50)
+
+  courtName      String?
+  claimAmount    Decimal?      @db.Decimal(14, 2)
+  currency       String        @default("SAR")
+
+  openedAt       DateTime      @default(now())
+  closedAt       DateTime?
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  parties        CaseParty[]
+  assignments    CaseAssignment[]
+  tasks          CaseTask[]
+  documents      Document[]
+  hearings       Hearing[]
+  timelineEvents CaseTimelineEvent[]
+  messages       Conversation[]
+  invoices       Invoice[]
+  aiAnalyses     AIAnalysis[]
+  auditLogs      AuditLog[]
+
+  @@unique([organizationId, caseNumber])
+  @@index([organizationId, status])
+  @@map("cases")
+}
+
+enum CasePartyRole {
+  CLIENT
+  OPPOSING_PARTY
+  OPPOSING_COUNSEL
+  THIRD_PARTY
+  WITNESS
+}
+
+/// أطراف القضية — الرابط الفعلي الذي يحدد عزل بيانات العميل
+model CaseParty {
+  id       String        @id @default(cuid())
+  caseId   String
+  case     Case          @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  clientId String?
+  client   Client?       @relation(fields: [clientId], references: [id])
+  role     CasePartyRole
+  name     String // لطرف ليس عميلاً مسجلاً (خصم مثلاً)
+  notes    String?
+
+  @@index([caseId])
+  @@index([clientId])
+  @@map("case_parties")
+}
+
+/// تخويل صريح لمحامٍ/منسّق للوصول إلى قضية — لا يوجد وصول ضمني
+model CaseAssignment {
+  id       String   @id @default(cuid())
+  caseId   String
+  case     Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  userId   String
+  user     User     @relation(fields: [userId], references: [id])
+  lawyerId String?
+  lawyer   Lawyer?  @relation(fields: [lawyerId], references: [id])
+  role     String // Lead Lawyer | Supporting | Coordinator | Read Only
+  assignedAt DateTime @default(now())
+
+  @@unique([caseId, userId])
+  @@map("case_assignments")
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  BLOCKED
+  DONE
+  CANCELLED
+}
+
+model CaseTask {
+  id          String       @id @default(cuid())
+  caseId      String
+  case        Case         @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  assigneeId  String?
+  assignee    User?        @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  createdById String
+  createdBy   User         @relation("TaskCreator", fields: [createdById], references: [id])
+
+  priority    TaskPriority @default(NORMAL)
+  status      TaskStatus   @default(TODO)
+  dueAt       DateTime?
+  completedAt DateTime?
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([caseId, status])
+  @@index([assigneeId, status])
+  @@map("case_tasks")
+}
+
+/// أحداث الخط الزمني للقضية (Claim, Contract, Payment, Filing, Hearing...)
+model CaseTimelineEvent {
+  id          String   @id @default(cuid())
+  caseId      String
+  case        Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  type        String // claim | contract | payment | correspondence | court_filing | hearing | response
+  title       String
+  description String?
+  occurredAt  DateTime
+  sourceDocumentId String?
+  isAIGenerated Boolean @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([caseId, occurredAt])
+  @@map("case_timeline_events")
+}
+
+// ----------------------------------------------------------------------------
+// Documents
+// ----------------------------------------------------------------------------
+
+enum DocumentStatus {
+  REQUIRED
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+}
+
+model Document {
+  id             String         @id @default(cuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  caseId         String?
+  case           Case?          @relation(fields: [caseId], references: [id])
+
+  title          String
+  description    String?
+  folder         String? // مسار منطقي: /عقود /مراسلات ...
+  tags           String[]
+  status         DocumentStatus @default(SUBMITTED)
+  isRequired     Boolean        @default(false)
+
+  uploadedById   String
+  uploadedBy     User           @relation("DocumentUploader", fields: [uploadedById], references: [id])
+
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  versions       DocumentVersion[]
+  aiAnalyses     AIAnalysis[]
+
+  @@index([organizationId])
+  @@index([caseId])
+  @@map("documents")
+}
+
+model DocumentVersion {
+  id            String   @id @default(cuid())
+  documentId    String
+  document      Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  versionNumber Int
+  storageKey    String // مفتاح الكائن في S3-compatible storage (ليس الرابط المباشر)
+  fileName      String
+  mimeType      String
+  sizeBytes     Int
+  checksum      String? // للتحقق من سلامة الملف
+  ocrText       String? // نص مستخرج بالـ OCR (اختياري)
+  uploadedById  String
+  createdAt     DateTime @default(now())
+
+  @@unique([documentId, versionNumber])
+  @@map("document_versions")
+}
+
+// ----------------------------------------------------------------------------
+// Hearings / Appointments (Calendar)
+// ----------------------------------------------------------------------------
+
+enum HearingStatus {
+  SCHEDULED
+  POSTPONED
+  COMPLETED
+  CANCELLED
+}
+
+model Hearing {
+  id          String        @id @default(cuid())
+  caseId      String
+  case        Case          @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  courtName   String?
+  location    String?
+  scheduledAt DateTime
+  durationMin Int           @default(60)
+  status      HearingStatus @default(SCHEDULED)
+  notes       String?
+
+  reminderOffsetsMin Int[]  @default([10080, 4320, 1440, 120]) // 7ي, 3ي, 24س, 2س — قابلة للتعديل
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  attendees   HearingAttendee[]
+
+  @@index([caseId, scheduledAt])
+  @@map("hearings")
+}
+
+model HearingAttendee {
+  id        String  @id @default(cuid())
+  hearingId String
+  hearing   Hearing @relation(fields: [hearingId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User    @relation(fields: [userId], references: [id])
+
+  @@unique([hearingId, userId])
+  @@map("hearing_attendees")
+}
+
+// ----------------------------------------------------------------------------
+// Messaging
+// ----------------------------------------------------------------------------
+
+model Conversation {
+  id        String    @id @default(cuid())
+  caseId    String?
+  case      Case?     @relation(fields: [caseId], references: [id])
+  title     String?
+  createdAt DateTime  @default(now())
+
+  messages  Message[]
+
+  @@index([caseId])
+  @@map("conversations")
+}
+
+enum MessageType {
+  TEXT
+  ATTACHMENT
+  SYSTEM
+}
+
+model Message {
+  id             String      @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String?
+  sender         User?       @relation("MessageSender", fields: [senderId], references: [id])
+  type           MessageType @default(TEXT)
+  body           String?
+  attachmentDocumentId String?
+  createdAt      DateTime    @default(now())
+  readBy         Json        @default("[]") // [{userId, readAt}]
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
+}
+
+// ----------------------------------------------------------------------------
+// Notifications
+// ----------------------------------------------------------------------------
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  SMS
+  WHATSAPP
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  READ
+}
+
+model Notification {
+  id             String              @id @default(cuid())
+  organizationId String
+  organization   Organization        @relation(fields: [organizationId], references: [id])
+  userId         String
+  user           User                @relation(fields: [userId], references: [id])
+  channel        NotificationChannel @default(IN_APP)
+  title          String
+  body           String
+  link           String?
+  status         NotificationStatus  @default(PENDING)
+  meta           Json?
+  createdAt      DateTime            @default(now())
+  sentAt         DateTime?
+  readAt         DateTime?
+
+  @@index([userId, status])
+  @@map("notifications")
+}
+
+// ----------------------------------------------------------------------------
+// Billing & Payments
+// ----------------------------------------------------------------------------
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+  REFUNDED
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id])
+  caseId         String?
+  case           Case?         @relation(fields: [caseId], references: [id])
+  clientId       String
+  client         Client        @relation(fields: [clientId], references: [id])
+
+  invoiceNumber  String
+  status         InvoiceStatus @default(DRAFT)
+  lineItems      Json // [{description, quantity, unitPrice}]
+  subtotal       Decimal       @db.Decimal(14, 2)
+  vatAmount      Decimal       @db.Decimal(14, 2) @default(0)
+  totalAmount    Decimal       @db.Decimal(14, 2)
+  currency       String        @default("SAR")
+  dueDate        DateTime?
+  issuedAt       DateTime?
+
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  payments       Payment[]
+
+  @@unique([organizationId, invoiceNumber])
+  @@index([organizationId, status])
+  @@map("invoices")
+}
+
+enum PaymentStatus {
+  INITIATED
+  AUTHORIZED
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+/// سجل الدفعات — لا تُخزَّن أي بيانات بطاقة هنا إطلاقًا، فقط مراجع للمزود
+model Payment {
+  id                String        @id @default(cuid())
+  invoiceId         String?
+  invoice           Invoice?      @relation(fields: [invoiceId], references: [id])
+  orderId           String?
+  order             Order?        @relation(fields: [orderId], references: [id])
+
+  provider          String // moyasar | hyperpay | tap | stripe
+  providerRef       String // معرّف العملية لدى المزود
+  amount            Decimal       @db.Decimal(14, 2)
+  currency          String        @default("SAR")
+  status            PaymentStatus @default(INITIATED)
+  webhookVerifiedAt DateTime? // يُملأ فقط بعد التحقق الفعلي من توقيع الـ Webhook
+
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([provider, providerRef])
+  @@map("payments")
+}
+
+// ----------------------------------------------------------------------------
+// Marketplace
+// ----------------------------------------------------------------------------
+
+enum ProviderCategory {
+  LEGAL_TRANSLATION
+  ACCOUNTING
+  FINANCIAL_EXPERT
+  REAL_ESTATE_VALUATION
+  ENGINEERING_EXPERT
+  TECHNICAL_EXPERT
+  DIGITAL_FORENSICS
+  RESEARCH
+  SURVEYING
+  OTHER
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+model MarketplaceProvider {
+  id             String              @id @default(cuid())
+  userId         String              @unique
+  user           User                @relation(fields: [userId], references: [id])
+
+  displayName    String
+  category       ProviderCategory
+  specialization String?
+  bio            String?
+  yearsExperience Int?
+  verification   VerificationStatus  @default(PENDING)
+  portfolioUrls  String[]
+  ratingAvg      Decimal             @default(0) @db.Decimal(3, 2)
+  ratingCount    Int                 @default(0)
+
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  services       MarketplaceService[]
+  orders         Order[]
+
+  @@map("marketplace_providers")
+}
+
+model MarketplaceService {
+  id          String              @id @default(cuid())
+  providerId  String
+  provider    MarketplaceProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  title       String
+  description String?
+  priceFrom   Decimal?            @db.Decimal(10, 2)
+  currency    String              @default("SAR")
+  isActive    Boolean             @default(true)
+
+  orders      Order[]
+
+  @@map("marketplace_services")
+}
+
+enum OrderStatus {
+  REQUESTED
+  QUOTED
+  APPROVED
+  IN_PROGRESS
+  DELIVERED
+  COMPLETED
+  CANCELLED
+}
+
+model Order {
+  id             String              @id @default(cuid())
+  organizationId String
+  organization   Organization        @relation(fields: [organizationId], references: [id])
+  providerId     String
+  provider       MarketplaceProvider @relation(fields: [providerId], references: [id])
+  serviceId      String?
+  service        MarketplaceService? @relation(fields: [serviceId], references: [id])
+  requestedById  String // Lawyer/Coordinator user id
+
+  brief          String
+  quotedAmount   Decimal?            @db.Decimal(10, 2)
+  status         OrderStatus         @default(REQUESTED)
+
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  payments       Payment[]
+  rating         Rating?
+
+  @@index([organizationId, status])
+  @@map("orders")
+}
+
+model Rating {
+  id        String   @id @default(cuid())
+  orderId   String   @unique
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  score     Int // 1-5
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@map("ratings")
+}
+
+// ----------------------------------------------------------------------------
+// AI Case Intelligence
+// ----------------------------------------------------------------------------
+
+enum AIAnalysisType {
+  CASE_BRIEF
+  TIMELINE_EXTRACTION
+  CONTRADICTION_DETECTION
+  MISSING_EVIDENCE
+  RISK_ANALYSIS
+  RESEARCH_QUESTIONS
+  DOCUMENT_EXTRACTION
+  LEGAL_RESEARCH
+}
+
+enum AIAnalysisStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  NEEDS_REVIEW
+}
+
+/// كل تحليل AI هو "مساعدة" فقط — يتطلب مراجعة بشرية قبل اعتماده (reviewedById)
+model AIAnalysis {
+  id             String            @id @default(cuid())
+  caseId         String?
+  case           Case?             @relation(fields: [caseId], references: [id])
+  documentId     String?
+  document       Document?         @relation(fields: [documentId], references: [id])
+
+  type           AIAnalysisType
+  status         AIAnalysisStatus  @default(QUEUED)
+  input          Json? // المدخلات (نص السؤال، معرّفات المستندات...)
+  output         Json? // الناتج المهيكل
+  modelProvider  String? // anthropic | openai | mock
+  modelName      String?
+  confidenceNote String? // توضيح حدود الثقة، وليس رقمًا مضللاً بمفرده
+
+  requiresHumanReview Boolean @default(true)
+  reviewedById   String?
+  reviewedAt     DateTime?
+
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@index([caseId, type])
+  @@map("ai_analyses")
+}
+
+// ----------------------------------------------------------------------------
+// Integrations (Najiz, Payment providers, AI providers...) — حالة الاتصال فقط
+// ----------------------------------------------------------------------------
+
+enum IntegrationKind {
+  NAJIZ
+  PAYMENT_MOYASAR
+  PAYMENT_HYPERPAY
+  PAYMENT_TAP
+  PAYMENT_STRIPE
+  AI_ANTHROPIC
+  AI_OPENAI
+  EMAIL_RESEND
+  SMS
+  WHATSAPP
+}
+
+enum IntegrationStatus {
+  NOT_CONFIGURED
+  SANDBOX
+  ACTIVE
+  ERROR
+  DISABLED
+}
+
+/// لا تُخزَّن أي Secrets هنا — فقط حالة الاتصال والميتاداتا لعرضها في لوحة الإعدادات
+model Integration {
+  id             String            @id @default(cuid())
+  organizationId String
+  organization   Organization      @relation(fields: [organizationId], references: [id])
+  kind           IntegrationKind
+  status         IntegrationStatus @default(NOT_CONFIGURED)
+  lastSyncAt     DateTime?
+  lastErrorMessage String?
+  metadata       Json?
+
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@unique([organizationId, kind])
+  @@map("integrations")
+}
+
+// ----------------------------------------------------------------------------
+// Audit Log — غير قابل للتعديل من أي مستخدم عادي
+// ----------------------------------------------------------------------------
+
+model AuditLog {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  actorId        String?
+  actor          User?        @relation(fields: [actorId], references: [id])
+  caseId         String?
+  case           Case?        @relation(fields: [caseId], references: [id])
+
+  action         String // e.g. "document.download", "case.status_changed"
+  entityType     String
+  entityId       String?
+  description    String // نص جاهز للعرض: "Ahmed downloaded Contract.pdf"
+  metadata       Json?
+
+  ipAddress      String?
+  userAgent      String?
+
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([caseId])
+  @@index([actorId])
+  @@map("audit_logs")
+}

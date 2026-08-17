@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 40 20% 98%;
+  --foreground: 220 10% 8%;
+  --border: 40 12% 88%;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: theme('colors.ivory.100');
+  color: theme('colors.charcoal.900');
+  font-feature-settings: 'ss01', 'ss02';
+  text-rendering: optimizeLegibility;
+}
+
+/* شريط تمرير هادئ يتماشى مع الهوية */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: theme('colors.neutral.300');
+  border-radius: 999px;
+}
+
+@layer components {
+  /* بطاقة أساسية في الـ Design System — استخدام محدود ومقصود، بدون إفراط */
+  .ds-card {
+    @apply rounded-lg border border-neutral-200 bg-white shadow-subtle;
+  }
+
+  .ds-card-elevated {
+    @apply rounded-lg border border-neutral-200 bg-white shadow-card;
+  }
+
+  .ds-kicker {
+    @apply text-xs font-semibold uppercase tracking-[0.2em] text-gold-600;
+  }
+
+  .ds-focus-ring {
+    @apply outline-none ring-2 ring-gold-500/40 ring-offset-2 ring-offset-ivory-100;
+  }
+}
+
+@layer utilities {
+  .transition-premium {
+    transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}

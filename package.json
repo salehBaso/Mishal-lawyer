@@ -1,0 +1,68 @@
+{
+  "name": "mishal-al-juhani-legal-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "منصة شركة مشعل الجهني للمحاماة والاستشارات — LegalTech Platform",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:studio": "prisma studio",
+    "prepare": "prisma generate",
+    "postinstall": "prisma generate"
+  },
+  "dependencies": {
+    "next": "14.2.15",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "typescript": "5.5.4",
+    "@prisma/client": "5.19.1",
+    "prisma": "5.19.1",
+    "next-auth": "5.0.0-beta.20",
+    "@auth/prisma-adapter": "2.4.2",
+    "bcryptjs": "2.4.3",
+    "zod": "3.23.8",
+    "ioredis": "5.4.1",
+    "date-fns": "3.6.0",
+    "date-fns-jalali": "3.6.0-0",
+    "clsx": "2.1.1",
+    "tailwind-merge": "2.5.2",
+    "class-variance-authority": "0.7.0",
+    "lucide-react": "0.436.0",
+    "recharts": "2.12.7",
+    "@aws-sdk/client-s3": "3.629.0",
+    "@aws-sdk/s3-request-presigner": "3.629.0",
+    "nanoid": "5.0.7",
+    "react-hook-form": "7.52.2",
+    "@hookform/resolvers": "3.9.0",
+    "sonner": "1.5.0",
+    "resend": "3.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.15",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "@types/bcryptjs": "2.4.6",
+    "autoprefixer": "10.4.20",
+    "postcss": "8.4.41",
+    "tailwindcss": "3.4.10",
+    "tailwindcss-rtl": "0.9.0",
+    "eslint": "8.57.0",
+    "eslint-config-next": "14.2.15",
+    "tsx": "4.17.0",
+    "prettier": "3.3.3",
+    "prettier-plugin-tailwindcss": "0.6.6"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  }
+}
